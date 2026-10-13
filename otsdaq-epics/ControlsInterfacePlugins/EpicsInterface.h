@@ -1,5 +1,5 @@
-#ifndef _ots_EpicsInterface_h
-#define _ots_EpicsInterface_h
+#ifndef OTSDAQ_EPICS_OTSDAQ_EPICS_CONTROLSINTERFACEPLUGINS_EPICSINTERFACE_H_
+#define OTSDAQ_EPICS_OTSDAQ_EPICS_CONTROLSINTERFACEPLUGINS_EPICSINTERFACE_H_
 
 #include <ctime>
 #include <fstream>
@@ -182,4 +182,4 @@ class EpicsInterface : public SlowControlsVInterface
 // clang-format on
 }  // namespace ots
 
-#endif
+#endif  // OTSDAQ_EPICS_OTSDAQ_EPICS_CONTROLSINTERFACEPLUGINS_EPICSINTERFACE_H_
