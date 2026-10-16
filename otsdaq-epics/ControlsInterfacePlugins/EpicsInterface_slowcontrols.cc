@@ -427,7 +427,7 @@ void EpicsInterface::eventCallback(struct event_handler_args eha)
 			}
 			break;
 		}
-		// if get operation failed, print channel name and message 
+		// if get operation failed, print channel name and message
 	}
 	else
 		printf("channel %s: get operation failed\n", ca_name(eha.chid));
@@ -1378,12 +1378,12 @@ std::vector<std::vector<std::string>> EpicsInterface::getChannelHistory(
 					    "desc";
 
 				// VIEW LAST 10 UPDATES
-				/**int num = */snprintf(buffer,
-				                      sizeof(buffer),
-				                      select.c_str(),
-				                      pvName.c_str(),
-				                      startTime,
-				                      endTime);
+				/**int num = */ snprintf(buffer,
+				                         sizeof(buffer),
+				                         select.c_str(),
+				                         pvName.c_str(),
+				                         startTime,
+				                         endTime);
 
 				res = PQexec(dcsArchiveDbConn, buffer);
 
@@ -1398,11 +1398,11 @@ std::vector<std::vector<std::string>> EpicsInterface::getChannelHistory(
 
 				if(PQntuples(res) > 0)
 				{
-					// first, print out the attribute names 
+					// first, print out the attribute names
 					int nFields = PQnfields(res);
 					history.resize(PQntuples(res));
 
-					// next, print out the rows 
+					// next, print out the rows
 					for(int i = 0; i < PQntuples(res); i++)
 					{
 						history[i].resize(nFields);
@@ -1474,9 +1474,9 @@ std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(
 			std::string row;
 
 			// ACTION FOR ALARM DB CHANNEL TABLE
-			/**int num = */snprintf(buffer,
-			                      sizeof(buffer),
-			                      "SELECT   pv.component_id					\
+			/**int num = */ snprintf(buffer,
+			                         sizeof(buffer),
+			                         "SELECT   pv.component_id					\
 								, alarm_tree.name							\
 								, pv.descr									\
 								, pv.pv_value								\
@@ -1496,7 +1496,7 @@ std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(
 						AND	pv.severity_id = severity.severity_id			\
 						AND	alarm_tree.name LIKE \'%%%s%%\'					\
 						ORDER BY pv.severity_id DESC;",
-			                      pvName.c_str());
+			                         pvName.c_str());
 
 			res = PQexec(dcsAlarmDbConn, buffer);
 			__COUT__ << "getLastAlarms(): SELECT pv table PQntuples(res): "
@@ -1517,7 +1517,7 @@ std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(
 				int nFields = PQnfields(res);
 				alarms.resize(PQntuples(res));
 
-				// next, print out the rows 
+				// next, print out the rows
 				for(int i = 0; i < PQntuples(res); i++)
 				{
 					alarms[i].resize(nFields);
@@ -1636,7 +1636,7 @@ std::vector<std::vector<std::string>> EpicsInterface::getAlarmsLog(
 				int nFields = PQnfields(res);
 				alarmsHistory.resize(PQntuples(res));
 
-				// next, print out the rows 
+				// next, print out the rows
 				for(int i = 0; i < PQntuples(res); i++)
 				{
 					alarmsHistory[i].resize(nFields);
