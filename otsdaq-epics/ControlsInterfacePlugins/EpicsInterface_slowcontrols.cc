@@ -35,6 +35,7 @@ const std::string EpicsInterface::EPICS_MINOR_ALARM 	= "MINOR";
 const std::string EpicsInterface::EPICS_MAJOR_ALARM 	= "MAJOR";
 
 const size_t EpicsInterface::MAX_CHART_POINTS   		= 5000;
+const size_t EpicsInterface::MAX_ALERT_QUEUE_SIZE = 10;
 const size_t EpicsInterface::CHART_BUCKET_COUNT 		= 800;
 
 // clang-format on
@@ -50,12 +51,115 @@ EpicsInterface::EpicsInterface(const std::string&       pluginType,
 	SEVCHK(ca_context_create(ca_enable_preemptive_callback),
 	       "EpicsInterface::EpicsInterface() : "
 	       "ca_enable_preemptive_callback_init()");
+	caContext_ = ca_current_context();
+
+	// The switch of the subscription mode:
+	//	by default a PV is subscribed to on demand, i.e. the first time its value or settings are requested
+	//	(only the PVs of the alarm tables, e.g. the ones checked at the FSM transitions, are subscribed to at initialize()).
+	//	With environment variable OTS_EPICS_SUBSCRIBE_ALL_AT_INIT=1 all the PVs are subscribed to at
+	//	initialize(), which takes minutes for tens of thousands of PVs.
+	const char* subscribeAll = getenv("OTS_EPICS_SUBSCRIBE_ALL_AT_INIT");
+	subscribeAllAtInit_      = subscribeAll != NULL &&
+	                      (std::string(subscribeAll) == "1" ||
+	                       std::string(subscribeAll) == "true" ||
+	                       std::string(subscribeAll) == "yes");
+	__GEN_COUT_INFO__ << "PVs are subscribed to "
+	                  << (subscribeAllAtInit_
+	                          ? "all at initialize (OTS_EPICS_SUBSCRIBE_ALL_AT_INIT is set)."
+	                          : "on demand (set OTS_EPICS_SUBSCRIBE_ALL_AT_INIT=1 to subscribe "
+	                            "to all at initialize).")
+	                  << __E__;
+}
+
+//==============================================================================
+/// requestChannel
+///	Starts the connection to a known PV that is not subscribed to yet, without waiting:
+///		the subscriptions are made by channelCallbackHandler() when the PV connects.
+///	Returns true if the connection was started by this call.
+bool EpicsInterface::requestChannel(const std::string& pvName)
+{
+	auto pvIt = mapOfPVInfo_.find(pvName);
+	if(pvIt == mapOfPVInfo_.end() || pvIt->second == NULL)
+		return false;
+
+	std::lock_guard<std::mutex> lock(requestChannelMutex_);
+	if(pvIt->second->requested || pvIt->second->channelID != NULL)
+		return false;  // already done
+
+	pvIt->second->requested = true;
+	attachToContext();
+	createChannel(pvName);
+	SEVCHK(ca_flush_io(), "EpicsInterface::requestChannel() : ca_flush_io");
+	return true;
+}  // end requestChannel()
+
+//==============================================================================
+/// getAlarmChannelNames
+///	Returns the PVs of the alarm tables of the configuration, i.e. the ones checked
+///		at the FSM transitions and the ones of the alarm notifications.
+std::set<std::string> EpicsInterface::getAlarmChannelNames()
+{
+	std::set<std::string> names;
+
+	auto addAlarms = [&](ConfigurationTree linkToAlarmsToMonitor) {
+		if(linkToAlarmsToMonitor.isDisconnected())
+			return;
+		for(const auto& alarmToMonitor : linkToAlarmsToMonitor.getChildren())
+			names.insert(
+			    alarmToMonitor.second.getNode("AlarmChannelName").getValue<std::string>());
+	};  // end addAlarms()
+
+	for(const std::string transition :
+	    {"Configure", "Halt", "Pause", "Resume", "Start", "Stop", "Running"})
+		try
+		{
+			addAlarms(getSelfNode().getNode("LinkTo" + transition + "AlarmsToMonitorTable"));
+		}
+		catch(...)
+		{
+			__GEN_COUT__ << "No alarms to monitor found for '" << transition << "'" << __E__;
+		}
+
+	try
+	{
+		auto linkToAlarmsToNotify =
+		    getSelfNode().getNode("LinkToAlarmAlertNotificationsTable");
+		if(!linkToAlarmsToNotify.isDisconnected())
+			for(const auto& alarmsToNotifyGroup : linkToAlarmsToNotify.getChildren())
+				try
+				{
+					addAlarms(
+					    alarmsToNotifyGroup.second.getNode("LinkToAlarmsToMonitorTable"));
+				}
+				catch(...)
+				{
+				}
+	}
+	catch(...)
+	{
+		__GEN_COUT__ << "No alarm notifications found." << __E__;
+	}
+
+	return names;
+}  // end getAlarmChannelNames()
+
+//==============================================================================
+/// The Channel Access context belongs to the thread that created it (the one of the constructor),
+/// so any other thread has to attach to it before using Channel Access.
+/// Otherwise Channel Access silently creates a new context for the calling thread, without preemptive callbacks,
+/// i.e. values are received only while that thread stays in ca_pend_event(), and the thread must never exit.
+void EpicsInterface::attachToContext()
+{
+	if(caContext_ != NULL && ca_current_context() == NULL)
+		SEVCHK(ca_attach_context(caContext_),
+		       "EpicsInterface::attachToContext() : ca_attach_context");
 }
 
 EpicsInterface::~EpicsInterface() { destroy(); }
 
 void EpicsInterface::destroy()
 {
+	attachToContext();
 	// __GEN_COUT__ << "mapOfPVInfo_.size() = " << mapOfPVInfo_.size() << __E__;
 	for(auto it = mapOfPVInfo_.begin(); it != mapOfPVInfo_.end(); it++)
 	{
@@ -173,6 +277,7 @@ void EpicsInterface::subscribe(const std::string& pvName)
 		__GEN_COUT__ << pvName << " doesn't exist!" << __E__;
 		return;
 	}
+	attachToContext();
 	createChannel(pvName);
 	usleep(10000);  // what makes the console hang at startup
 	subscribeToChannel(pvName, mapOfPVInfo_.find(pvName)->second->channelType);
@@ -228,6 +333,7 @@ void EpicsInterface::unsubscribe(const std::string& pvName)
 		return;
 	}
 
+	attachToContext();
 	cancelSubscriptionToChannel(pvName);
 	return;
 }
@@ -483,7 +589,16 @@ void EpicsInterface::channelCallbackHandler(struct connection_handler_args& cha)
 	{
 		__GEN_COUT__ << pv << cha.chid << " connected! " << __E__;
 
-		mapOfPVInfo_.find(pv)->second->channelType = ca_field_type(cha.chid);
+		PVInfo* pvInfo      = mapOfPVInfo_.find(pv)->second;
+		pvInfo->channelType = ca_field_type(cha.chid);
+		// a channel created on demand is subscribed to here, once, when the type of the PV is known
+		//	(Channel Access restores the subscriptions at each reconnection)
+		if(pvInfo->requested && pvInfo->eventID == NULL)
+		{
+			if(pvInfo->channelID == NULL)  // connected before createChannel() returned
+				pvInfo->channelID = cha.chid;
+			subscribeToChannel(pv, pvInfo->channelType);
+		}
 		readPVRecord(pv);
 
 		/*status_ =
@@ -592,7 +707,48 @@ void EpicsInterface::loadListOfPVs()
 		}
 	*/
 	// HERE GET PVS LIST FROM DB
-	if(dcsArchiveDbConnStatus_ == 1)
+	// Note: if the login of the plugin failed (e.g., the password of the writer account is not
+	//	in the environment of a remotely started supervisor), the list is read with the
+	//	read-only account (DCS_ARCHIVE_DATABASE_READER_USER, _PWD or ~/.pgpass), which is enough to monitor the PVs.
+	PGconn* listConn = dcsArchiveDbConnStatus_ == 1 ? dcsArchiveDbConn : nullptr;
+	PGconn* readerConn = nullptr;
+	if(listConn == nullptr && getenv("DCS_ARCHIVE_DATABASE_HOST") != NULL &&
+	   getenv("DCS_ARCHIVE_DATABASE_READER_USER") != NULL)
+	{
+		auto getEnv = [](const char* name) {
+			const char* env = getenv(name);
+			return std::string(env ? env : "");
+		};  // end getEnv()
+		const std::string host     = getEnv("DCS_ARCHIVE_DATABASE_HOST");
+		const std::string port     = getEnv("DCS_ARCHIVE_DATABASE_PORT");
+		const std::string dbname   = getEnv("DCS_ARCHIVE_DATABASE");
+		const std::string user     = getEnv("DCS_ARCHIVE_DATABASE_READER_USER");
+		const std::string password = getEnv("DCS_ARCHIVE_DATABASE_READER_PWD");
+
+		const char* const keywords[] = {
+		    "host", "port", "dbname", "user", "password", "connect_timeout", "options", nullptr};
+		const char* const values[] = {
+		    host.c_str(),
+		    port.c_str(),
+		    dbname == "" ? "dcs_archive" : dbname.c_str(),
+		    user.c_str(),
+		    password.c_str(),
+		    "5",
+		    "-c statement_timeout=20000 -c default_transaction_read_only=on",
+		    nullptr};
+		readerConn = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
+		if(PQstatus(readerConn) == CONNECTION_OK)
+		{
+			__GEN_COUT__ << "Reading the PVs list with the read-only account '" << user
+			             << "'" << __E__;
+			listConn = readerConn;
+		}
+		else
+			__GEN_COUT_ERR__ << "Could not read the PVs list with the read-only account '"
+			                 << user << "': " << PQerrorMessage(readerConn) << __E__;
+	}
+
+	if(listConn != nullptr)
 	{
 		PGresult*   res;
 		char        buffer[1024];
@@ -601,7 +757,7 @@ void EpicsInterface::loadListOfPVs()
 
 		__GEN_COUT__ << "Reading database PVS List" << __E__;
 		snprintf(buffer, sizeof(buffer), "SELECT name FROM channel");
-		res = PQexec(dcsArchiveDbConn, buffer);
+		res = PQexec(listConn, buffer);
 
 		if(PQresultStatus(res) == PGRES_TUPLES_OK)
 		{
@@ -618,18 +774,33 @@ void EpicsInterface::loadListOfPVs()
 		}
 		else
 		{
-			__GEN_COUT__ << "SELECT failed: " << PQerrorMessage(dcsArchiveDbConn)
-			             << __E__;
+			__GEN_COUT__ << "SELECT failed: " << PQerrorMessage(listConn) << __E__;
 			PQclear(res);
 		}
 	}
+	if(readerConn != nullptr)
+		PQfinish(readerConn);
 
-	__GEN_COUT__ << "Here is our pv list!" << __E__;
-	// subscribe for each pv
-	for(auto pv : mapOfPVInfo_)
+	if(subscribeAllAtInit_)
 	{
-		__GEN_COUT__ << pv.first << __E__;
-		subscribe(pv.first);
+		__GEN_COUT__ << "Here is our pv list!" << __E__;
+		// subscribe for each pv
+		for(auto pv : mapOfPVInfo_)
+		{
+			__GEN_COUT__ << pv.first << __E__;
+			subscribe(pv.first);
+		}
+	}
+	else
+	{
+		// only the PVs of the alarm tables (e.g., checked at the FSM transitions) are subscribed to now,
+		//	the others on demand, see requestChannel()
+		const std::set<std::string> alarmChannels = getAlarmChannelNames();
+		__GEN_COUT__ << mapOfPVInfo_.size() << " PVs found, subscribing now to the "
+		             << alarmChannels.size()
+		             << " PVs of the alarm tables and to the others on demand." << __E__;
+		for(const auto& alarmChannel : alarmChannels)
+			subscribe(alarmChannel);
 	}
 
 	// channels are subscribed to by here.
@@ -642,8 +813,10 @@ void EpicsInterface::loadListOfPVs()
 	// }
 
 	__GEN_COUT__ << "Finished reading file and subscribing to pvs!" << __E__;
-	SEVCHK(ca_pend_event(0.0),
-	       "EpicsInterface::subscribe() : ca_pend_event(0.0)");  // Start listening
+	// Note: do not use ca_pend_event(0.0) here, a timeout of 0 means wait forever, so
+	// initialize() would never return and the plugin would be reported as busy forever.
+	// The callbacks are preemptive (see constructor and attachToContext()), so flushing the requests is enough.
+	SEVCHK(ca_flush_io(), "EpicsInterface::loadListOfPVs() : ca_flush_io");
 
 	return;
 }
@@ -926,7 +1099,11 @@ void EpicsInterface::writePVControlValueToRecord(
 		__GEN_COUT__ << pvName << " doesn't exist!" << __E__;
 		return;
 	}
-	mapOfPVInfo_.find(pvName)->second->settings = *pdata;
+	{
+		std::lock_guard<std::mutex> lock(pvDataMutex_);
+		mapOfPVInfo_.find(pvName)->second->settings         = *pdata;
+		mapOfPVInfo_.find(pvName)->second->settingsReceived = true;
+	}
 
 	if(DEBUG)
 	{
@@ -963,6 +1140,7 @@ void EpicsInterface::writePVValueToRecord(const std::string& pvName,
 
 	PVInfo* pvInfo = mapOfPVInfo_.find(pvName)->second;
 
+	std::lock_guard<std::mutex> lock(pvDataMutex_);
 	if(pvInfo->mostRecentBufferIndex != pvInfo->dataCache.size() - 1 &&
 	   pvInfo->mostRecentBufferIndex != (unsigned int)(-1))
 	{
@@ -998,10 +1176,15 @@ void EpicsInterface::writePVAlertToQueue(const std::string& pvName,
 		__GEN_COUT__ << pvName << " doesn't exist!" << __E__;
 		return;
 	}
+	PVInfo* pvInfo = mapOfPVInfo_.find(pvName)->second;
+
+	std::lock_guard<std::mutex> lock(pvDataMutex_);
 	if(pvTime)
-		mapOfPVInfo_.find(pvName)->second->pvTime = pvTime;
+		pvInfo->pvTime = pvTime;
 	PVAlerts alert(time(0), status, severity);
-	mapOfPVInfo_.find(pvName)->second->alerts.push(alert);
+	pvInfo->alerts.push(alert);
+	while(pvInfo->alerts.size() > MAX_ALERT_QUEUE_SIZE)  // only the most recent are used
+		pvInfo->alerts.pop();
 	//__GEN_COUT__ << "writePVAlertToQueue(): " << pvName << " " << status << " "
 	//<< severity << __E__;
 
@@ -1088,7 +1271,12 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 		PVInfo*     pv = mapOfPVInfo_.find(pvName)->second;
 		std::string time, value, status, severity;
 
-		int index = pv->mostRecentBufferIndex;
+		if(!subscribeAllAtInit_)
+			requestChannel(pvName);  // without waiting: the value is 'DC' until the PV connects
+
+		// the values are written by the Channel Access threads
+		std::unique_lock<std::mutex> lock(pvDataMutex_);
+		int                          index = pv->mostRecentBufferIndex;
 
 		__GEN_COUTT__ << pv << index << __E__;
 
@@ -1120,6 +1308,7 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 			status   = "UDF";
 			severity = "INVALID";
 		}
+		lock.unlock();
 		// Time, Value, Status, Severity
 
 		__GEN_COUTT__ << "Index:    " << index << __E__;
@@ -1169,6 +1358,18 @@ std::array<std::string, 9> EpicsInterface::getSettings(const std::string& pvName
 		            upperWarningLimit = "DC'd", lowerWarningLimit = "DC'd",
 		            lowerAlarmLimit = "DC'd", upperControlLimit = "DC'd",
 		            lowerControlLimit = "DC'd";
+
+		// the pages request the settings only once, so if the PV is connected to
+		//	on demand by this call, wait shortly for its settings
+		if(!subscribeAllAtInit_ && requestChannel(pvName))
+			for(int i = 0; i < 50; ++i)  // up to 0.5 seconds
+			{
+				usleep(10000);
+				std::lock_guard<std::mutex> lock(pvDataMutex_);
+				if(mapOfPVInfo_.find(pvName)->second->settingsReceived)
+					break;
+			}
+
 		if(mapOfPVInfo_.find(pvName)->second != NULL)  // Check to see if the pvName
 		                                               // maps to a null pointer so
 		                                               // we don't have any errors
@@ -1177,7 +1378,8 @@ std::array<std::string, 9> EpicsInterface::getSettings(const std::string& pvName
 			    // subscription
 			{
 				// dbr_ctrl_char* set = &mapOfPVInfo_.find(pvName)->second->settings;
-				dbr_ctrl_double* set = &mapOfPVInfo_.find(pvName)->second->settings;
+				std::lock_guard<std::mutex> lock(pvDataMutex_);
+				dbr_ctrl_double*            set = &mapOfPVInfo_.find(pvName)->second->settings;
 
 				// sprintf(&units[0],"%d",set->units);
 				units             = set->units;
@@ -2005,6 +2207,18 @@ std::vector<std::string> EpicsInterface::checkAlarm(const std::string& pvName,
 		       << "' was not found in PV list!" << __E__;
 		__SS_THROW__;
 	}
+
+	// if the PV is connected to on demand by this call (i.e. it was not in the alarm tables
+	//	at initialize()), wait for its first value and severity not to take it as disconnected
+	if(!subscribeAllAtInit_ && requestChannel(pvIt->first))
+		for(int i = 0; i < 200; ++i)  // up to 2 seconds
+		{
+			usleep(10000);
+			std::lock_guard<std::mutex> lock(pvDataMutex_);
+			if(pvIt->second->mostRecentBufferIndex != (unsigned int)(-1) &&
+			   !pvIt->second->alerts.empty())
+				break;
+		}
 
 	auto valueArray = getCurrentValue(pvIt->first);
 
