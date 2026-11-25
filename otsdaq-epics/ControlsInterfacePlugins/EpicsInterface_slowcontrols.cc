@@ -20,6 +20,8 @@
 /// EpicsWebClient
 #pragma GCC diagnostic pop
 
+#include <cmath>  //for isfinite
+
 // clang-format off
 #define DEBUG false
 #define PV_FILE_NAME 		std::string(getenv("SERVICE_DATA_PATH")) + "/SlowControlsDashboardData/pv_list.dat";
@@ -31,6 +33,9 @@ const std::string EpicsInterface::EPICS_NO_ALARM 		= "NO_ALARM";
 const std::string EpicsInterface::EPICS_INVALID_ALARM 	= "INVALID";
 const std::string EpicsInterface::EPICS_MINOR_ALARM 	= "MINOR";
 const std::string EpicsInterface::EPICS_MAJOR_ALARM 	= "MAJOR";
+
+const size_t EpicsInterface::MAX_CHART_POINTS   		= 5000;
+const size_t EpicsInterface::CHART_BUCKET_COUNT 		= 800;
 
 // clang-format on
 
@@ -1058,7 +1063,7 @@ void EpicsInterface::popQueue(const std::string& pvName)
 //========================================================================================================================
 std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pvName)
 {
-	__GEN_COUT__ << "void EpicsInterface::getCurrentValue() reached" << __E__;
+	__GEN_COUTT__ << "void EpicsInterface::getCurrentValue() reached" << __E__;
 
 	if(mapOfPVInfo_.find(pvName) != mapOfPVInfo_.end())
 	{
@@ -1067,7 +1072,7 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 
 		int index = pv->mostRecentBufferIndex;
 
-		__GEN_COUT__ << pv << index << __E__;
+		__GEN_COUTT__ << pv << index << __E__;
 
 		if(0 <= index && index < pv->circularBufferSize)
 		{
@@ -1076,8 +1081,11 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 
 			time     = std::to_string(pv->dataCache[index].first);
 			value    = pv->dataCache[index].second;
-			status   = pv->alerts.back().status;
-			severity = pv->alerts.back().severity;
+			if(!pv->alerts.empty())
+			{
+				status   = pv->alerts.back().status;
+				severity = pv->alerts.back().severity;
+			}
 		}
 		else if(index == -1)
 		{
@@ -1095,11 +1103,11 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 		}
 		// Time, Value, Status, Severity
 
-		__GEN_COUT__ << "Index:    " << index << __E__;
-		__GEN_COUT__ << "Time:     " << time << __E__;
-		__GEN_COUT__ << "Value:    " << value << __E__;
-		__GEN_COUT__ << "Status:   " << status << __E__;
-		__GEN_COUT__ << "Severity: " << severity << __E__;
+		__GEN_COUTT__ << "Index:    " << index << __E__;
+		__GEN_COUTT__ << "Time:     " << time << __E__;
+		__GEN_COUTT__ << "Value:    " << value << __E__;
+		__GEN_COUTT__ << "Status:   " << status << __E__;
+		__GEN_COUTT__ << "Severity: " << severity << __E__;
 
 		/*	if(pv->valueChange)
 				{
@@ -1120,8 +1128,8 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 	}
 	else
 	{
-		__GEN_COUT__ << pvName << " was not found!" << __E__;
-		__GEN_COUT__ << "Trying to resubscribe to " << pvName << __E__;
+		__GEN_COUTT__ << pvName << " was not found!" << __E__;
+		__GEN_COUTT__ << "Trying to resubscribe to " << pvName << __E__;
 		// subscribe(pvName);
 	}
 
@@ -1457,6 +1465,273 @@ std::vector<std::vector<std::string>> EpicsInterface::getChannelHistory(
 
 	return history;
 }  // end getChannelHistory()
+
+namespace
+{
+//==============================================================================
+/// returns str ready to be placed inside a JSON string
+std::string escapeJSON(const std::string& str)
+{
+	std::string retStr;
+	retStr.reserve(str.size() + 20);
+	char hex[8];
+	for(const unsigned char c : str)
+	{
+		if(c == '"' || c == '\\')
+		{
+			retStr += '\\';
+			retStr += (char)c;
+		}
+		else if(c < 0x20 || c == 0x7f)
+		{
+			snprintf(hex, sizeof(hex), "\\u%04x", c);
+			retStr += hex;
+		}
+		else
+			retStr += (char)c;
+	}
+	return retStr;
+}  // end escapeJSON()
+
+//==============================================================================
+/// returns the first line of the libpq error message
+std::string firstLine(const char* message)
+{
+	std::string retStr = message ? message : "";
+	return retStr.substr(0, retStr.find('\n'));
+}  // end firstLine()
+
+//==============================================================================
+/// returns the database field as JSON number, or null (e.g., for NULL, NaN and Infinity)
+std::string getJSONNumber(PGresult* res, int row, int col)
+{
+	if(PQgetisnull(res, row, col))
+		return "null";
+	const char* value = PQgetvalue(res, row, col);
+	char*       end   = nullptr;
+	if(!std::isfinite(strtod(value, &end)) || end == value || *end != '\0')
+		return "null";
+	return value;
+}  // end getJSONNumber()
+
+//==============================================================================
+/// appends one point [time, value, minimum, maximum] per row; rows have 2 or 4 columns
+void appendPoints(std::string& json, bool& first, PGresult* res)
+{
+	const bool hasRange = PQnfields(res) >= 4;
+	for(int i = 0; i < PQntuples(res); ++i)
+	{
+		json += first ? "[" : ",[";
+		first = false;
+		json += getJSONNumber(res, i, 0) + "," + getJSONNumber(res, i, 1) + ",";
+		json += hasRange ? (getJSONNumber(res, i, 2) + "," + getJSONNumber(res, i, 3))
+		                 : "null,null";
+		json += "]";
+	}
+}  // end appendPoints()
+}  // namespace
+
+//========================================================================================================================
+/// getChannelHistoryJSON
+///	Returns the history of the pv, read from the archiver database (CSS/Phoebus RDB
+/// 	schema), as JSON object:
+///		points 				:= array of [time, value, minimum, maximum], oldest first. The first point
+///								is the last sample before the time window (its value holds into the window).
+///		reducedToBuckets 	:= true if points are the mean (and minimum, maximum) of time buckets
+///		archiveProblem 		:= empty, or the reason why there are no points
+///		units, lowLimit, highLimit := from the archived display metadata (alarm limits), if any
+///
+///	When there are more than MAX_CHART_POINTS samples in the time window, the samples
+/// 	are reduced by the database to CHART_BUCKET_COUNT buckets of mean, minimum and maximum.
+///
+///	One short-lived read-only connection is opened per call, so this is independent of
+/// 	the state of the plugin (and of its database connections). The connection is made
+/// 	with the READ-ONLY account defined by the environment variables
+///		DCS_ARCHIVE_DATABASE_READER_USER, DCS_ARCHIVE_DATABASE_READER_PWD
+/// 	or, if not defined, with the account of the plugin (DCS_ARCHIVE_DATABASE_USER, _PWD).
+std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
+                                                  double             startTime,
+                                                  double             endTime)
+{
+	std::string points, meta, problem;
+	bool        reducedToBuckets = false;
+
+	// Note: the archive engine marks the times without a value (e.g., pv disconnected or
+	//	archive engine stopped) with samples that have a special status and a meaningless
+	//	value (e.g., 0), so those are returned as null, i.e. as a gap in the chart.
+	const std::string VALUE =
+	    "CASE WHEN status_id IN (SELECT status_id FROM status WHERE name IN "
+	    "('NaN','Disconnected','Archive_Off','Archive_Disabled','Write_Error')) THEN NULL "
+	    "ELSE COALESCE(float_val, num_val::double precision) END";
+
+	PGconn*   connection = nullptr;
+	PGresult* res        = nullptr;
+
+	// executes query, returns false (and sets problem) on failure
+	auto query = [&](const std::string& sql, const std::vector<std::string>& parameters) {
+		std::vector<const char*> values;
+		for(const auto& parameter : parameters)
+			values.push_back(parameter.c_str());
+		if(res)
+			PQclear(res);
+		res = PQexecParams(connection,
+		                   sql.c_str(),
+		                   values.size(),
+		                   nullptr /*paramTypes*/,
+		                   values.data(),
+		                   nullptr /*paramLengths*/,
+		                   nullptr /*paramFormats*/,
+		                   0 /*resultFormat text*/);
+		if(PQresultStatus(res) == PGRES_TUPLES_OK)
+			return true;
+		problem = "query failed: " + firstLine(PQresultErrorMessage(res));
+		return false;
+	};  // end query()
+
+	auto getEnv = [](const char* name) {
+		const char* env = getenv(name);
+		return std::string(env ? env : "");
+	};  // end getEnv()
+
+	const std::string host = getEnv("DCS_ARCHIVE_DATABASE_HOST");
+	const std::string port = getEnv("DCS_ARCHIVE_DATABASE_PORT");
+	std::string       dbname = getEnv("DCS_ARCHIVE_DATABASE");
+	if(dbname == "")
+		dbname = "dcs_archive";
+	std::string user     = getEnv("DCS_ARCHIVE_DATABASE_READER_USER");
+	std::string password = getEnv("DCS_ARCHIVE_DATABASE_READER_PWD");
+	if(user == "")  // no read-only account, so use the account of the plugin
+	{
+		user     = getEnv("DCS_ARCHIVE_DATABASE_USER");
+		password = getEnv("DCS_ARCHIVE_DATABASE_PWD");
+	}
+
+	if(host == "")
+		problem =
+		    "not configured (environment variable DCS_ARCHIVE_DATABASE_HOST is not set)";
+	else
+	{
+		// protect the database: short timeouts and read-only transactions
+		//	(if the password is empty, libpq looks for it in ~/.pgpass)
+		const char* const keywords[] = {"host",
+		                                "port",
+		                                "dbname",
+		                                "user",
+		                                "password",
+		                                "connect_timeout",
+		                                "options",
+		                                nullptr};
+		const char* const values[]   = {
+		      host.c_str(),
+		      port.c_str(),
+		      dbname.c_str(),
+		      user.c_str(),
+		      password.c_str(),
+		      "5",
+		      "-c statement_timeout=20000 -c default_transaction_read_only=on",
+		      nullptr};
+		connection = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
+		if(PQstatus(connection) != CONNECTION_OK)
+			problem = "cannot connect: " + firstLine(PQerrorMessage(connection));
+	}
+
+	// the pv names (e.g., from the alarm server) may have a protocol prefix
+	std::string name = pvName;
+	if(name.find("://") != std::string::npos)
+		name = name.substr(name.find("://") + 3);
+
+	const std::string from = std::to_string(startTime), to = std::to_string(endTime);
+	std::string       channelId;
+
+	do  // once, to break out at first problem
+	{
+		if(problem != "")
+			break;
+
+		if(!query("SELECT channel_id FROM channel WHERE name = $1 ORDER BY channel_id "
+		          "DESC LIMIT 1",
+		          {name}))
+			break;
+		if(PQntuples(res) < 1)
+		{
+			problem = "this variable is not archived";
+			break;
+		}
+		channelId = PQgetvalue(res, 0, 0);
+
+		if(query("SELECT unit, low_alarm_lmt, high_alarm_lmt FROM num_metadata WHERE "
+		         "channel_id = $1",
+		         {channelId}) &&
+		   PQntuples(res) > 0)
+			meta = "\"units\":\"" + escapeJSON(PQgetvalue(res, 0, 0)) +
+			       "\",\"lowLimit\":" + getJSONNumber(res, 0, 1) +
+			       ",\"highLimit\":" + getJSONNumber(res, 0, 2) + ",";
+		problem = "";  //metadata is optional
+
+		bool first = true;
+
+		// Note: every lookup goes through channel_id, and orders by channel_id too, to keep
+		//	the planner on the (channel_id, smpl_time) index.
+
+		// last sample before the time window
+		if(!query("SELECT extract(epoch FROM smpl_time), " + VALUE +
+		              " FROM sample WHERE channel_id = $1 AND smpl_time < "
+		              "to_timestamp($2::double precision) ORDER BY channel_id DESC, "
+		              "smpl_time DESC LIMIT 1",
+		          {channelId, from}))
+			break;
+		appendPoints(points, first, res);
+
+		if(!query("SELECT extract(epoch FROM smpl_time), " + VALUE +
+		              " FROM sample WHERE channel_id = $1 AND smpl_time >= "
+		              "to_timestamp($2::double precision) AND smpl_time <= "
+		              "to_timestamp($3::double precision) ORDER BY channel_id, smpl_time "
+		              "LIMIT " +
+		              std::to_string(MAX_CHART_POINTS + 1),
+		          {channelId, from, to}))
+			break;
+
+		if((size_t)PQntuples(res) <= MAX_CHART_POINTS)
+		{
+			appendPoints(points, first, res);
+			break;
+		}
+
+		// too many samples, so reduce to buckets
+		const double bucketSeconds = (endTime - startTime) / CHART_BUCKET_COUNT;
+		if(!query("SELECT min(extract(epoch FROM smpl_time)), avg(sampleValue), "
+		          "min(sampleValue), max(sampleValue) FROM (SELECT smpl_time, " +
+		              VALUE +
+		              " AS sampleValue FROM sample WHERE channel_id = $1 AND smpl_time "
+		              ">= to_timestamp($2::double precision) AND smpl_time <= "
+		              "to_timestamp($3::double precision)) AS windowSamples GROUP BY "
+		              "floor((extract(epoch FROM smpl_time) - $2::double precision) / "
+		              "$4::double precision) ORDER BY 1",
+		          {channelId,
+		           from,
+		           to,
+		           std::to_string(bucketSeconds > 1e-6 ? bucketSeconds : 1e-6)}))
+			break;
+		appendPoints(points, first, res);
+		reducedToBuckets = true;
+	} while(0);
+
+	if(res)
+		PQclear(res);
+	if(connection)
+		PQfinish(connection);
+
+	if(problem != "")
+	{
+		__GEN_COUT__ << "No archiver history for '" << pvName << "': " << problem
+		             << __E__;
+		points = "";
+	}
+
+	return "{" + meta + "\"pv\":\"" + escapeJSON(pvName) + "\",\"points\":[" + points +
+	       "],\"reducedToBuckets\":" + (reducedToBuckets ? "true" : "false") +
+	       ",\"archiveProblem\":\"" + escapeJSON(problem) + "\"}";
+}  // end getChannelHistoryJSON()
 
 //========================================================================================================================
 std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(

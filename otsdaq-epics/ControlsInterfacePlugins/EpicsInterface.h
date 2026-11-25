@@ -115,6 +115,9 @@ class EpicsInterface : public SlowControlsVInterface
 	static const std::string 				EPICS_MINOR_ALARM;
 	static const std::string 				EPICS_MAJOR_ALARM;
 
+	static const size_t 					MAX_CHART_POINTS; 	///< above this the history samples are reduced to buckets
+	static const size_t 					CHART_BUCKET_COUNT;
+
 	void 									initialize				(void) override;
 	void 									destroy					(void);
 
@@ -126,6 +129,7 @@ class EpicsInterface : public SlowControlsVInterface
 	std::array<std::string, 4> 				getCurrentValue			(const std::string& pvName) override;
 	std::array<std::string, 9> 				getSettings				(const std::string& pvName) override;
 	std::vector<std::vector<std::string>> 	getChannelHistory		(const std::string& pvName, int startTime, int endTime) override;
+	std::string 							getChannelHistoryJSON	(const std::string& pvName, double startTime, double endTime) override;
 	std::vector<std::vector<std::string>>	getLastAlarms			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	getAlarmsLog			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	checkAlarmNotifications	(void) override;
