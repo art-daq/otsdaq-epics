@@ -1081,15 +1081,15 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 		}
 		else if(index == -1)
 		{
-			time     = "N/a";
-			value    = "N/a";
+			time     = "N/A";
+			value    = "N/A";
 			status   = "DC";
 			severity = "DC";
 		}
 		else
 		{
-			time     = "N/a";
-			value    = "N/a";
+			time     = "N/A";
+			value    = "N/A";
 			status   = "UDF";
 			severity = "INVALID";
 		}
@@ -1125,8 +1125,8 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 		// subscribe(pvName);
 	}
 
-	std::array<std::string, 4> currentValues = {"PV Not Found", "NF", "N/a", "N/a"};
-	// std::string currentValues [4] = {"N/a", "N/a", "N/a", "N/a"};
+	std::array<std::string, 4> currentValues = {"PV Not Found", "NF", "N/A", "N/A"};
+	// std::string currentValues [4] = {"N/A", "N/A", "N/A", "N/A"};
 	return currentValues;
 }
 
@@ -1448,7 +1448,7 @@ std::vector<std::vector<std::string>> EpicsInterface::getChannelHistory(
 	else
 	{
 		history.resize(1);
-		history[0] = {"PV Not Found", "NF", "N/a", "N/a"};
+		history[0] = {"PV Not Found", "NF", "N/A", "N/A"};
 		__GEN_COUT__ << "getChannelHistory() pvName " << pvName << " was not found!"
 		             << __E__;
 		__GEN_COUT__ << "Trying to resubscribe to " << pvName << __E__;
@@ -1537,18 +1537,18 @@ std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(
 				alarms[0] = {
 				    "0",
 				    "Alarms List Not Found",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
 				};
 			}
 
@@ -1656,10 +1656,10 @@ std::vector<std::vector<std::string>> EpicsInterface::getAlarmsLog(
 				alarmsHistory[0] = {
 				    "0",
 				    "Alarms List Not Found",
-				    "N/a",
-				    "N/a",
-				    "N/a",
-				    "N/a",
+				    "N/A",
+				    "N/A",
+				    "N/A",
+				    "N/A",
 				};
 			}
 
