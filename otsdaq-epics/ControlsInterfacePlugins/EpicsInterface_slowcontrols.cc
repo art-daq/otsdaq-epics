@@ -59,16 +59,16 @@ EpicsInterface::EpicsInterface(const std::string&       pluginType,
 	//	With environment variable OTS_EPICS_SUBSCRIBE_ALL_AT_INIT=1 all the PVs are subscribed to at
 	//	initialize(), which takes minutes for tens of thousands of PVs.
 	const char* subscribeAll = getenv("OTS_EPICS_SUBSCRIBE_ALL_AT_INIT");
-	subscribeAllAtInit_      = subscribeAll != NULL &&
-	                      (std::string(subscribeAll) == "1" ||
-	                       std::string(subscribeAll) == "true" ||
-	                       std::string(subscribeAll) == "yes");
-	__GEN_COUT_INFO__ << "PVs are subscribed to "
-	                  << (subscribeAllAtInit_
-	                          ? "all at initialize (OTS_EPICS_SUBSCRIBE_ALL_AT_INIT is set)."
-	                          : "on demand (set OTS_EPICS_SUBSCRIBE_ALL_AT_INIT=1 to subscribe "
-	                            "to all at initialize).")
-	                  << __E__;
+	subscribeAllAtInit_ = subscribeAll != NULL && (std::string(subscribeAll) == "1" ||
+	                                               std::string(subscribeAll) == "true" ||
+	                                               std::string(subscribeAll) == "yes");
+	__GEN_COUT_INFO__
+	    << "PVs are subscribed to "
+	    << (subscribeAllAtInit_
+	            ? "all at initialize (OTS_EPICS_SUBSCRIBE_ALL_AT_INIT is set)."
+	            : "on demand (set OTS_EPICS_SUBSCRIBE_ALL_AT_INIT=1 to subscribe "
+	              "to all at initialize).")
+	    << __E__;
 }
 
 //==============================================================================
@@ -105,19 +105,21 @@ std::set<std::string> EpicsInterface::getAlarmChannelNames()
 		if(linkToAlarmsToMonitor.isDisconnected())
 			return;
 		for(const auto& alarmToMonitor : linkToAlarmsToMonitor.getChildren())
-			names.insert(
-			    alarmToMonitor.second.getNode("AlarmChannelName").getValue<std::string>());
+			names.insert(alarmToMonitor.second.getNode("AlarmChannelName")
+			                 .getValue<std::string>());
 	};  // end addAlarms()
 
 	for(const std::string transition :
 	    {"Configure", "Halt", "Pause", "Resume", "Start", "Stop", "Running"})
 		try
 		{
-			addAlarms(getSelfNode().getNode("LinkTo" + transition + "AlarmsToMonitorTable"));
+			addAlarms(
+			    getSelfNode().getNode("LinkTo" + transition + "AlarmsToMonitorTable"));
 		}
 		catch(...)
 		{
-			__GEN_COUT__ << "No alarms to monitor found for '" << transition << "'" << __E__;
+			__GEN_COUT__ << "No alarms to monitor found for '" << transition << "'"
+			             << __E__;
 		}
 
 	try
@@ -710,7 +712,7 @@ void EpicsInterface::loadListOfPVs()
 	// Note: if the login of the plugin failed (e.g., the password of the writer account is not
 	//	in the environment of a remotely started supervisor), the list is read with the
 	//	read-only account (DCS_ARCHIVE_DATABASE_READER_USER, _PWD or ~/.pgpass), which is enough to monitor the PVs.
-	PGconn* listConn = dcsArchiveDbConnStatus_ == 1 ? dcsArchiveDbConn : nullptr;
+	PGconn* listConn   = dcsArchiveDbConnStatus_ == 1 ? dcsArchiveDbConn : nullptr;
 	PGconn* readerConn = nullptr;
 	if(listConn == nullptr && getenv("DCS_ARCHIVE_DATABASE_HOST") != NULL &&
 	   getenv("DCS_ARCHIVE_DATABASE_READER_USER") != NULL)
@@ -725,17 +727,23 @@ void EpicsInterface::loadListOfPVs()
 		const std::string user     = getEnv("DCS_ARCHIVE_DATABASE_READER_USER");
 		const std::string password = getEnv("DCS_ARCHIVE_DATABASE_READER_PWD");
 
-		const char* const keywords[] = {
-		    "host", "port", "dbname", "user", "password", "connect_timeout", "options", nullptr};
-		const char* const values[] = {
-		    host.c_str(),
-		    port.c_str(),
-		    dbname == "" ? "dcs_archive" : dbname.c_str(),
-		    user.c_str(),
-		    password.c_str(),
-		    "5",
-		    "-c statement_timeout=20000 -c default_transaction_read_only=on",
-		    nullptr};
+		const char* const keywords[] = {"host",
+		                                "port",
+		                                "dbname",
+		                                "user",
+		                                "password",
+		                                "connect_timeout",
+		                                "options",
+		                                nullptr};
+		const char* const values[]   = {
+            host.c_str(),
+            port.c_str(),
+            dbname == "" ? "dcs_archive" : dbname.c_str(),
+            user.c_str(),
+            password.c_str(),
+            "5",
+            "-c statement_timeout=20000 -c default_transaction_read_only=on",
+            nullptr};
 		readerConn = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
 		if(PQstatus(readerConn) == CONNECTION_OK)
 		{
@@ -1272,7 +1280,8 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 		std::string time, value, status, severity;
 
 		if(!subscribeAllAtInit_)
-			requestChannel(pvName);  // without waiting: the value is 'DC' until the PV connects
+			requestChannel(
+			    pvName);  // without waiting: the value is 'DC' until the PV connects
 
 		// the values are written by the Channel Access threads
 		std::unique_lock<std::mutex> lock(pvDataMutex_);
@@ -1286,8 +1295,8 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 			//__E__;
 
 			// timestamp of the pv, or time of reception if not known
-			time = std::to_string(pv->pvTime ? pv->pvTime : pv->dataCache[index].first);
-			value    = pv->dataCache[index].second;
+			time  = std::to_string(pv->pvTime ? pv->pvTime : pv->dataCache[index].first);
+			value = pv->dataCache[index].second;
 			if(!pv->alerts.empty())
 			{
 				status   = pv->alerts.back().status;
@@ -1379,7 +1388,7 @@ std::array<std::string, 9> EpicsInterface::getSettings(const std::string& pvName
 			{
 				// dbr_ctrl_char* set = &mapOfPVInfo_.find(pvName)->second->settings;
 				std::lock_guard<std::mutex> lock(pvDataMutex_);
-				dbr_ctrl_double*            set = &mapOfPVInfo_.find(pvName)->second->settings;
+				dbr_ctrl_double* set = &mapOfPVInfo_.find(pvName)->second->settings;
 
 				// sprintf(&units[0],"%d",set->units);
 				units             = set->units;
@@ -1782,7 +1791,8 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 	//	value (e.g., 0), so those are returned as null, i.e. as a gap in the chart.
 	const std::string VALUE =
 	    "CASE WHEN status_id IN (SELECT status_id FROM status WHERE name IN "
-	    "('NaN','Disconnected','Archive_Off','Archive_Disabled','Write_Error')) THEN NULL "
+	    "('NaN','Disconnected','Archive_Off','Archive_Disabled','Write_Error')) THEN "
+	    "NULL "
 	    "ELSE COALESCE(float_val, num_val::double precision) END";
 
 	PGconn*   connection = nullptr;
@@ -1814,8 +1824,8 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 		return std::string(env ? env : "");
 	};  // end getEnv()
 
-	const std::string host = getEnv("DCS_ARCHIVE_DATABASE_HOST");
-	const std::string port = getEnv("DCS_ARCHIVE_DATABASE_PORT");
+	const std::string host   = getEnv("DCS_ARCHIVE_DATABASE_HOST");
+	const std::string port   = getEnv("DCS_ARCHIVE_DATABASE_PORT");
 	std::string       dbname = getEnv("DCS_ARCHIVE_DATABASE");
 	if(dbname == "")
 		dbname = "dcs_archive";
@@ -1843,14 +1853,14 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 		                                "options",
 		                                nullptr};
 		const char* const values[]   = {
-		      host.c_str(),
-		      port.c_str(),
-		      dbname.c_str(),
-		      user.c_str(),
-		      password.c_str(),
-		      "5",
-		      "-c statement_timeout=20000 -c default_transaction_read_only=on",
-		      nullptr};
+            host.c_str(),
+            port.c_str(),
+            dbname.c_str(),
+            user.c_str(),
+            password.c_str(),
+            "5",
+            "-c statement_timeout=20000 -c default_transaction_read_only=on",
+            nullptr};
 		connection = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
 		if(PQstatus(connection) != CONNECTION_OK)
 			problem = "cannot connect: " + firstLine(PQerrorMessage(connection));
