@@ -398,6 +398,20 @@ void EpicsInterface::eventCallback(struct event_handler_args eha)
 			printf("\n");
 	  }*/
 			break;
+		case DBR_TIME_DOUBLE:
+			if(DEBUG)
+			{
+				__COUT__ << "Response Type: DBR_TIME_DOUBLE" << __E__;
+			}
+			((EpicsInterface*)eha.usr)
+			    ->writePVAlertToQueue(ca_name(eha.chid),
+			                          epicsAlarmConditionStrings[pBuf->tdblval.status],
+			                          epicsAlarmSeverityStrings[pBuf->tdblval.severity],
+			                          pBuf->tdblval.stamp.secPastEpoch
+			                              ? (time_t)pBuf->tdblval.stamp.secPastEpoch +
+			                                    POSIX_TIME_AT_EPICS_EPOCH
+			                              : 0);
+			break;
 		case DBR_STS_DOUBLE:
 			if(DEBUG)
 			{
@@ -815,7 +829,8 @@ void EpicsInterface::subscribeToChannel(const std::string& pvName,
 	       "EpicsInterface::subscribeToChannel() : ca_create_subscription "
 	       "dbf_type_to_DBR");
 
-	SEVCHK(ca_create_subscription(DBR_STS_DOUBLE,
+	// status and severity, with the timestamp of the pv
+	SEVCHK(ca_create_subscription(DBR_TIME_DOUBLE,
 	                              1,
 	                              mapOfPVInfo_.find(pvName)->second->channelID,
 	                              DBE_VALUE | DBE_ALARM | DBE_PROPERTY,
@@ -823,7 +838,7 @@ void EpicsInterface::subscribeToChannel(const std::string& pvName,
 	                              this,
 	                              &(mapOfPVInfo_.find(pvName)->second->eventID)),
 	       "EpicsInterface::subscribeToChannel() : ca_create_subscription "
-	       "DBR_STS_DOUBLE");
+	       "DBR_TIME_DOUBLE");
 
 	SEVCHK(ca_create_subscription(DBR_CTRL_DOUBLE,
 	                              1,
@@ -975,13 +990,16 @@ void EpicsInterface::writePVValueToRecord(const std::string& pvName,
 
 void EpicsInterface::writePVAlertToQueue(const std::string& pvName,
                                          const char*        status,
-                                         const char*        severity)
+                                         const char*        severity,
+                                         time_t             pvTime /* = 0 */)
 {
 	if(!checkIfPVExists(pvName))
 	{
 		__GEN_COUT__ << pvName << " doesn't exist!" << __E__;
 		return;
 	}
+	if(pvTime)
+		mapOfPVInfo_.find(pvName)->second->pvTime = pvTime;
 	PVAlerts alert(time(0), status, severity);
 	mapOfPVInfo_.find(pvName)->second->alerts.push(alert);
 	//__GEN_COUT__ << "writePVAlertToQueue(): " << pvName << " " << status << " "
@@ -1079,7 +1097,8 @@ std::array<std::string, 4> EpicsInterface::getCurrentValue(const std::string& pv
 			//__GEN_COUT__ << pv->dataCache[index].first <<" "<< std::time(0)-60 <<
 			//__E__;
 
-			time     = std::to_string(pv->dataCache[index].first);
+			// timestamp of the pv, or time of reception if not known
+			time = std::to_string(pv->pvTime ? pv->pvTime : pv->dataCache[index].first);
 			value    = pv->dataCache[index].second;
 			if(!pv->alerts.empty())
 			{

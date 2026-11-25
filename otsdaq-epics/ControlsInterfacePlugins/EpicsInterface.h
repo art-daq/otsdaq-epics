@@ -87,6 +87,7 @@ struct PVInfo
 							  ///< we open the viewer for the first time - get to see
 							  ///< what is DC'd
 	std::queue<PVAlerts> alerts;
+	time_t               pvTime = 0;  ///< timestamp of the pv [s since epoch], 0 if not known
 	//struct dbr_ctrl_char settings;
 	struct dbr_ctrl_double settings;
 
@@ -166,7 +167,7 @@ class EpicsInterface : public SlowControlsVInterface
 	void 									writePVValueToRecord	(const std::string& pvName, const std::string& pdata);
 	//void writePVControlValueToRecord(std::string pvName, struct dbr_ctrl_char* pdata);
 	void 									writePVControlValueToRecord(const std::string& pvName, struct dbr_ctrl_double* pdata);
-	void 									writePVAlertToQueue		(const std::string& pvName, const char* status, const char* severity);
+	void 									writePVAlertToQueue		(const std::string& pvName, const char* status, const char* severity, time_t pvTime = 0);
 	void 									readPVRecord			(const std::string& pvName);
 	void 									debugConsole			(const std::string& pvName);
 	static void								eventCallback			(struct event_handler_args eha);
