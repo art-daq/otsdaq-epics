@@ -1985,9 +1985,9 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 ///		problem 	:= empty, or the reason why there are no rows
 ///
 ///	The history is written by the alarm logger (mu2e-dcs apps/AlarmLogger, Kafka to
-/// 	PostgreSQL) in three tables of the archiver database: <prefix>command_log,
-/// 	<prefix>state_log and <prefix>config_log, where <prefix> is the environment
-/// 	variable DCS_ALARM_LOG_TABLE_PREFIX (default: public.alarm_).
+/// 	PostgreSQL) in three tables of the archiver database: public.alarm_command_log,
+/// 	public.alarm_state_log and public.alarm_config_log.
+///	Note: the query text is made only of constants, the filter is a query parameter.
 ///
 ///	The filter is searched in all the commands and configuration changes, but only in
 /// 	the most recent MAX_ALARM_STATES_SEARCHED state changes (to bound the query time).
@@ -2000,21 +2000,12 @@ std::string EpicsInterface::getAlarmHistoryJSON(const std::string& type,
 	const size_t MAX_ALARM_STATES_SEARCHED = 200000;
 	std::string  columns, rows, problem, fields, searchFields, table;
 
-	const char* prefixEnv = getenv("DCS_ALARM_LOG_TABLE_PREFIX");
-	std::string prefix    = prefixEnv ? prefixEnv : "public.alarm_";
-	// the prefix goes into the query text, so accept only [schema.]name
-	for(const char c : prefix)
-		if(!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.'))
-			problem =
-			    "illegal table prefix in environment variable "
-			    "DCS_ALARM_LOG_TABLE_PREFIX";
-
 	if(type == "commands")
 	{
 		columns = "\"time\",\"configuration\",\"command\",\"user\",\"host\",\"path\"";
 		fields  = "config, command, username, host, path";
 		searchFields = "config, path, command, username, host";
-		table        = "command_log";
+		table        = "public.alarm_command_log";
 	}
 	else if(type == "states")
 	{
@@ -2025,7 +2016,7 @@ std::string EpicsInterface::getAlarmHistoryJSON(const std::string& type,
 		    "config, pv, severity, message, value, extract(epoch FROM alarm_time), "
 		    "current_severity, current_message, path";
 		searchFields = "config, path, severity, message, current_severity";
-		table        = "state_log";
+		table        = "public.alarm_state_log";
 	}
 	else if(type == "configs")
 	{
@@ -2034,7 +2025,7 @@ std::string EpicsInterface::getAlarmHistoryJSON(const std::string& type,
 		    "\"value\"";
 		fields       = "config, action, username, host, path, left(value::text, 300)";
 		searchFields = "config, path, action, username, host";
-		table        = "config_log";
+		table        = "public.alarm_config_log";
 	}
 	else
 		problem = "illegal alarm history type '" + type + "'";
@@ -2051,12 +2042,12 @@ std::string EpicsInterface::getAlarmHistoryJSON(const std::string& type,
 		// Note: position() and not LIKE, so that the filter has no special characters;
 		//	newest first by id, i.e. by primary key and in the order of logging.
 		const std::string sql =
-		    "SELECT extract(epoch FROM kafka_time), " + fields + " FROM " + prefix +
-		    table + " WHERE ($1 = '' OR position(lower($1) in lower(concat_ws(' ', " +
+		    "SELECT extract(epoch FROM kafka_time), " + fields + " FROM " + table +
+		    " WHERE ($1 = '' OR position(lower($1) in lower(concat_ws(' ', " +
 		    searchFields + "))) > 0)" +
 		    // the state changes can be millions, so bound the search to the most recent ones
-		    (type == "states" ? " AND id > (SELECT max(id) FROM " + prefix + table +
-		                            ") - " + std::to_string(MAX_ALARM_STATES_SEARCHED)
+		    (type == "states" ? " AND id > (SELECT max(id) FROM " + table + ") - " +
+		                            std::to_string(MAX_ALARM_STATES_SEARCHED)
 		                      : std::string("")) +
 		    " ORDER BY id DESC LIMIT " + std::to_string(maxRows);
 		const char* const values[] = {filter.c_str()};
