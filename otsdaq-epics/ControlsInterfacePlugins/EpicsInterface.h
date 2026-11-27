@@ -4,7 +4,9 @@
 #include <ctime>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <queue>
+#include <set>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -87,8 +89,11 @@ struct PVInfo
 							  ///< we open the viewer for the first time - get to see
 							  ///< what is DC'd
 	std::queue<PVAlerts> alerts;
+	time_t               pvTime = 0;  ///< timestamp of the pv [s since epoch], 0 if not known
 	//struct dbr_ctrl_char settings;
 	struct dbr_ctrl_double settings;
+	bool                 requested        = false;  ///< channel was created on demand, so the subscriptions are made when it connects
+	bool                 settingsReceived = false;
 
 };
 
@@ -115,6 +120,10 @@ class EpicsInterface : public SlowControlsVInterface
 	static const std::string 				EPICS_MINOR_ALARM;
 	static const std::string 				EPICS_MAJOR_ALARM;
 
+	static const size_t 					MAX_CHART_POINTS; 	///< above this the history samples are reduced to buckets
+	static const size_t 					CHART_BUCKET_COUNT;
+	static const size_t 					MAX_ALERT_QUEUE_SIZE; 	///< status/severity changes kept in memory per pv
+
 	void 									initialize				(void) override;
 	void 									destroy					(void);
 
@@ -126,6 +135,9 @@ class EpicsInterface : public SlowControlsVInterface
 	std::array<std::string, 4> 				getCurrentValue			(const std::string& pvName) override;
 	std::array<std::string, 9> 				getSettings				(const std::string& pvName) override;
 	std::vector<std::vector<std::string>> 	getChannelHistory		(const std::string& pvName, int startTime, int endTime) override;
+	std::string 							getChannelHistoryJSON	(const std::string& pvName, double startTime, double endTime) override;
+	std::string 							getAlarmHistoryJSON		(const std::string& type, const std::string& filter, size_t maxRows) override;
+	std::string 							setChannelValue			(const std::string& pvName, const std::string& value) override;
 	std::vector<std::vector<std::string>>	getLastAlarms			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	getAlarmsLog			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	checkAlarmNotifications	(void) override;
@@ -151,6 +163,9 @@ class EpicsInterface : public SlowControlsVInterface
 	///This is a workloop/thread, by default do nothing and end thread during running (Note: return true would repeat call)
 	///
   private:
+	void 									attachToContext			(void);
+	bool 									requestChannel			(const std::string& pvName);
+	std::set<std::string> 					getAlarmChannelNames	(void);
 	bool 									checkIfPVExists			(const std::string& pvName);
 	void 									loadListOfPVs			(void);
 	void 									getControlValues		(const std::string& pvName);
@@ -162,7 +177,7 @@ class EpicsInterface : public SlowControlsVInterface
 	void 									writePVValueToRecord	(const std::string& pvName, const std::string& pdata);
 	//void writePVControlValueToRecord(std::string pvName, struct dbr_ctrl_char* pdata);
 	void 									writePVControlValueToRecord(const std::string& pvName, struct dbr_ctrl_double* pdata);
-	void 									writePVAlertToQueue		(const std::string& pvName, const char* status, const char* severity);
+	void 									writePVAlertToQueue		(const std::string& pvName, const char* status, const char* severity, time_t pvTime = 0);
 	void 									readPVRecord			(const std::string& pvName);
 	void 									debugConsole			(const std::string& pvName);
 	static void								eventCallback			(struct event_handler_args eha);
@@ -177,6 +192,10 @@ class EpicsInterface : public SlowControlsVInterface
 	//  std::map<chid, std::string> mapOfPVs_;
 	std::map<std::string, PVInfo*> 			mapOfPVInfo_;
 	int                            			status_;
+	struct ca_client_context* 				caContext_ = NULL; 	///< Channel Access context created by the constructor, shared by all threads
+	std::mutex 								pvDataMutex_; 		///< protects the values of all PVInfo, written by the Channel Access threads
+	std::mutex 								requestChannelMutex_; 	///< protects the creation of channels on demand
+	bool 									subscribeAllAtInit_ = false; ///< the switch between subscribing to all PVs at initialize() or on demand, see constructor
 	std::string 							loginErrorMsg_;
 };
 // clang-format on
