@@ -1759,6 +1759,64 @@ void appendPoints(std::string& json, bool& first, PGresult* res)
 		json += "]";
 	}
 }  // end appendPoints()
+
+//==============================================================================
+/// returns a new connection to the archiver database for read-only transactions (to be
+/// 	closed with PQfinish, if not null), and sets problem on failure. The connection
+/// 	is made with the READ-ONLY account defined by the environment variables
+///		DCS_ARCHIVE_DATABASE_READER_USER, DCS_ARCHIVE_DATABASE_READER_PWD
+/// 	or, if not defined, with the account of the plugin (DCS_ARCHIVE_DATABASE_USER, _PWD).
+PGconn* connectArchiveReader(std::string& problem)
+{
+	auto getEnv = [](const char* name) {
+		const char* env = getenv(name);
+		return std::string(env ? env : "");
+	};  // end getEnv()
+
+	const std::string host   = getEnv("DCS_ARCHIVE_DATABASE_HOST");
+	const std::string port   = getEnv("DCS_ARCHIVE_DATABASE_PORT");
+	std::string       dbname = getEnv("DCS_ARCHIVE_DATABASE");
+	if(dbname == "")
+		dbname = "dcs_archive";
+	std::string user     = getEnv("DCS_ARCHIVE_DATABASE_READER_USER");
+	std::string password = getEnv("DCS_ARCHIVE_DATABASE_READER_PWD");
+	if(user == "")  // no read-only account, so use the account of the plugin
+	{
+		user     = getEnv("DCS_ARCHIVE_DATABASE_USER");
+		password = getEnv("DCS_ARCHIVE_DATABASE_PWD");
+	}
+
+	if(host == "")
+	{
+		problem =
+		    "not configured (environment variable DCS_ARCHIVE_DATABASE_HOST is not set)";
+		return nullptr;
+	}
+
+	// protect the database: short timeouts and read-only transactions
+	//	(if the password is empty, libpq looks for it in ~/.pgpass)
+	const char* const keywords[] = {"host",
+	                                "port",
+	                                "dbname",
+	                                "user",
+	                                "password",
+	                                "connect_timeout",
+	                                "options",
+	                                nullptr};
+	const char* const values[]   = {
+        host.c_str(),
+        port.c_str(),
+        dbname.c_str(),
+        user.c_str(),
+        password.c_str(),
+        "5",
+        "-c statement_timeout=20000 -c default_transaction_read_only=on",
+        nullptr};
+	PGconn* connection = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
+	if(PQstatus(connection) != CONNECTION_OK)
+		problem = "cannot connect: " + firstLine(PQerrorMessage(connection));
+	return connection;
+}  // end connectArchiveReader()
 }  // namespace
 
 //========================================================================================================================
@@ -1775,10 +1833,7 @@ void appendPoints(std::string& json, bool& first, PGresult* res)
 /// 	are reduced by the database to CHART_BUCKET_COUNT buckets of mean, minimum and maximum.
 ///
 ///	One short-lived read-only connection is opened per call, so this is independent of
-/// 	the state of the plugin (and of its database connections). The connection is made
-/// 	with the READ-ONLY account defined by the environment variables
-///		DCS_ARCHIVE_DATABASE_READER_USER, DCS_ARCHIVE_DATABASE_READER_PWD
-/// 	or, if not defined, with the account of the plugin (DCS_ARCHIVE_DATABASE_USER, _PWD).
+/// 	the state of the plugin (and of its database connections), see connectArchiveReader().
 std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
                                                   double             startTime,
                                                   double             endTime)
@@ -1819,52 +1874,7 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 		return false;
 	};  // end query()
 
-	auto getEnv = [](const char* name) {
-		const char* env = getenv(name);
-		return std::string(env ? env : "");
-	};  // end getEnv()
-
-	const std::string host   = getEnv("DCS_ARCHIVE_DATABASE_HOST");
-	const std::string port   = getEnv("DCS_ARCHIVE_DATABASE_PORT");
-	std::string       dbname = getEnv("DCS_ARCHIVE_DATABASE");
-	if(dbname == "")
-		dbname = "dcs_archive";
-	std::string user     = getEnv("DCS_ARCHIVE_DATABASE_READER_USER");
-	std::string password = getEnv("DCS_ARCHIVE_DATABASE_READER_PWD");
-	if(user == "")  // no read-only account, so use the account of the plugin
-	{
-		user     = getEnv("DCS_ARCHIVE_DATABASE_USER");
-		password = getEnv("DCS_ARCHIVE_DATABASE_PWD");
-	}
-
-	if(host == "")
-		problem =
-		    "not configured (environment variable DCS_ARCHIVE_DATABASE_HOST is not set)";
-	else
-	{
-		// protect the database: short timeouts and read-only transactions
-		//	(if the password is empty, libpq looks for it in ~/.pgpass)
-		const char* const keywords[] = {"host",
-		                                "port",
-		                                "dbname",
-		                                "user",
-		                                "password",
-		                                "connect_timeout",
-		                                "options",
-		                                nullptr};
-		const char* const values[]   = {
-            host.c_str(),
-            port.c_str(),
-            dbname.c_str(),
-            user.c_str(),
-            password.c_str(),
-            "5",
-            "-c statement_timeout=20000 -c default_transaction_read_only=on",
-            nullptr};
-		connection = PQconnectdbParams(keywords, values, 0 /*expand_dbname*/);
-		if(PQstatus(connection) != CONNECTION_OK)
-			problem = "cannot connect: " + firstLine(PQerrorMessage(connection));
-	}
+	connection = connectArchiveReader(problem);
 
 	// the pv names (e.g., from the alarm server) may have a protocol prefix
 	std::string name = pvName;
@@ -1963,6 +1973,136 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 	       "],\"reducedToBuckets\":" + (reducedToBuckets ? "true" : "false") +
 	       ",\"archiveProblem\":\"" + escapeJSON(problem) + "\"}";
 }  // end getChannelHistoryJSON()
+
+//========================================================================================================================
+/// getAlarmHistoryJSON
+///	Returns the most recent entries (newest first) of the history of the Phoebus alarm
+/// 	system, as JSON object:
+///		type 		:= commands (e.g., acknowledge, with user and host), states (alarm state
+///						changes of the pvs) or configs (alarm configuration changes)
+///		columns 	:= array of column names; time and alarmTime are [s since epoch]
+///		rows 		:= array of rows, each an array with one value per column
+///		problem 	:= empty, or the reason why there are no rows
+///
+///	The history is written by the alarm logger (mu2e-dcs apps/AlarmLogger, Kafka to
+/// 	PostgreSQL) in three tables of the archiver database: <prefix>command_log,
+/// 	<prefix>state_log and <prefix>config_log, where <prefix> is the environment
+/// 	variable DCS_ALARM_LOG_TABLE_PREFIX (default: public.alarm_).
+///
+///	The filter is searched in all the commands and configuration changes, but only in
+/// 	the most recent MAX_ALARM_STATES_SEARCHED state changes (to bound the query time).
+///
+///	One short-lived read-only connection is opened per call, see connectArchiveReader().
+std::string EpicsInterface::getAlarmHistoryJSON(const std::string& type,
+                                                const std::string& filter,
+                                                size_t             maxRows)
+{
+	const size_t MAX_ALARM_STATES_SEARCHED = 200000;
+	std::string  columns, rows, problem, fields, searchFields, table;
+
+	const char* prefixEnv = getenv("DCS_ALARM_LOG_TABLE_PREFIX");
+	std::string prefix    = prefixEnv ? prefixEnv : "public.alarm_";
+	// the prefix goes into the query text, so accept only [schema.]name
+	for(const char c : prefix)
+		if(!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.'))
+			problem =
+			    "illegal table prefix in environment variable "
+			    "DCS_ALARM_LOG_TABLE_PREFIX";
+
+	if(type == "commands")
+	{
+		columns = "\"time\",\"configuration\",\"command\",\"user\",\"host\",\"path\"";
+		fields  = "config, command, username, host, path";
+		searchFields = "config, path, command, username, host";
+		table        = "command_log";
+	}
+	else if(type == "states")
+	{
+		columns =
+		    "\"time\",\"configuration\",\"pv\",\"severity\",\"status\",\"value\","
+		    "\"alarmTime\",\"currentSeverity\",\"currentStatus\",\"path\"";
+		fields =
+		    "config, pv, severity, message, value, extract(epoch FROM alarm_time), "
+		    "current_severity, current_message, path";
+		searchFields = "config, path, severity, message, current_severity";
+		table        = "state_log";
+	}
+	else if(type == "configs")
+	{
+		columns =
+		    "\"time\",\"configuration\",\"action\",\"user\",\"host\",\"path\","
+		    "\"value\"";
+		fields       = "config, action, username, host, path, left(value::text, 300)";
+		searchFields = "config, path, action, username, host";
+		table        = "config_log";
+	}
+	else
+		problem = "illegal alarm history type '" + type + "'";
+
+	if(maxRows < 1 || maxRows > 10000)
+		maxRows = 500;
+
+	PGconn*   connection = nullptr;
+	PGresult* res        = nullptr;
+	if(problem == "")
+		connection = connectArchiveReader(problem);
+	if(problem == "")
+	{
+		// Note: position() and not LIKE, so that the filter has no special characters;
+		//	newest first by id, i.e. by primary key and in the order of logging.
+		const std::string sql =
+		    "SELECT extract(epoch FROM kafka_time), " + fields + " FROM " + prefix +
+		    table + " WHERE ($1 = '' OR position(lower($1) in lower(concat_ws(' ', " +
+		    searchFields + "))) > 0)" +
+		    // the state changes can be millions, so bound the search to the most recent ones
+		    (type == "states" ? " AND id > (SELECT max(id) FROM " + prefix + table +
+		                            ") - " + std::to_string(MAX_ALARM_STATES_SEARCHED)
+		                      : std::string("")) +
+		    " ORDER BY id DESC LIMIT " + std::to_string(maxRows);
+		const char* const values[] = {filter.c_str()};
+		res                        = PQexecParams(connection,
+                           sql.c_str(),
+                           1,
+                           nullptr /*paramTypes*/,
+                           values,
+                           nullptr /*paramLengths*/,
+                           nullptr /*paramFormats*/,
+                           0 /*resultFormat text*/);
+		if(PQresultStatus(res) != PGRES_TUPLES_OK)
+			problem = "query failed: " + firstLine(PQresultErrorMessage(res));
+		else
+			for(int i = 0; i < PQntuples(res); ++i)
+			{
+				rows += i ? ",[" : "[";
+				for(int j = 0; j < PQnfields(res); ++j)
+				{
+					if(j)
+						rows += ",";
+					// times are numbers, all the rest are strings
+					if(j == 0 || (type == "states" && j == 6))
+						rows += getJSONNumber(res, i, j);
+					else
+						rows += "\"" + escapeJSON(PQgetvalue(res, i, j)) + "\"";
+				}
+				rows += "]";
+			}
+	}
+
+	if(res)
+		PQclear(res);
+	if(connection)
+		PQfinish(connection);
+
+	if(problem != "")
+	{
+		__GEN_COUT__ << "No alarm history of type '" << type << "': " << problem << __E__;
+		rows = "";
+	}
+
+	return "{\"type\":\"" + escapeJSON(type) + "\",\"columns\":[" + columns +
+	       "],\"rows\":[" + rows + "],\"maxRows\":" + std::to_string(maxRows) +
+	       ",\"problem\":\"" + escapeJSON(problem) + "\"}";
+}  // end getAlarmHistoryJSON()
 
 //========================================================================================================================
 std::vector<std::vector<std::string>> EpicsInterface::getLastAlarms(
