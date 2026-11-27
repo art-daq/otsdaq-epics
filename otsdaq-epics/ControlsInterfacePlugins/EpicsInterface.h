@@ -137,6 +137,7 @@ class EpicsInterface : public SlowControlsVInterface
 	std::vector<std::vector<std::string>> 	getChannelHistory		(const std::string& pvName, int startTime, int endTime) override;
 	std::string 							getChannelHistoryJSON	(const std::string& pvName, double startTime, double endTime) override;
 	std::string 							getAlarmHistoryJSON		(const std::string& type, const std::string& filter, size_t maxRows) override;
+	std::string 							setChannelValue			(const std::string& pvName, const std::string& value) override;
 	std::vector<std::vector<std::string>>	getLastAlarms			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	getAlarmsLog			(const std::string& pvName) override;
 	std::vector<std::vector<std::string>>	checkAlarmNotifications	(void) override;

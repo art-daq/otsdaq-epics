@@ -1975,6 +1975,60 @@ std::string EpicsInterface::getChannelHistoryJSON(const std::string& pvName,
 }  // end getChannelHistoryJSON()
 
 //========================================================================================================================
+/// setChannelValue
+///	Writes value to the PV, without waiting for the record to process it.
+///	Returns an empty string, or the reason why the value was not written.
+///
+///	The PV must be known (see loadListOfPVs()) and connected: if it was never requested
+/// 	its connection is started here, so that a later call can succeed.
+///	A numeric value is written as number (e.g., 1 is the second state of an enum PV),
+/// 	any other value as string.
+///
+///	Note: the caller decides which user may write which value to which PV.
+std::string EpicsInterface::setChannelValue(const std::string& pvName,
+                                            const std::string& value)
+{
+	auto pvIt = mapOfPVInfo_.find(pvName);
+	if(pvIt == mapOfPVInfo_.end() || pvIt->second == NULL)
+		return "not known to the controls plugin";
+	if(value.empty() || value.size() >= sizeof(dbr_string_t))
+		return "illegal value";
+
+	requestChannel(pvName);
+	attachToContext();
+
+	chid channel = NULL;
+	{
+		std::lock_guard<std::mutex> lock(requestChannelMutex_);
+		channel = pvIt->second->channelID;
+	}
+	if(channel == NULL || ca_state(channel) != cs_conn)
+		return "not connected";
+	if(!ca_write_access(channel))
+		return "no write access";
+
+	char*        end    = NULL;
+	const double number = strtod(value.c_str(), &end);
+	int          status;
+	if(ca_field_type(channel) != DBF_STRING && end != NULL && *end == '\0')
+		status = ca_put(DBR_DOUBLE, channel, &number);
+	else
+	{
+		dbr_string_t text;
+		strncpy(text, value.c_str(), sizeof(text) - 1);
+		text[sizeof(text) - 1] = '\0';
+		status                 = ca_put(DBR_STRING, channel, text);
+	}
+	if(status == ECA_NORMAL)
+		status = ca_flush_io();
+	if(status != ECA_NORMAL)
+		return std::string("Channel Access error: ") + ca_message(status);
+
+	__GEN_COUT__ << "Wrote '" << value << "' to " << pvName << __E__;
+	return "";
+}  // end setChannelValue()
+
+//========================================================================================================================
 /// getAlarmHistoryJSON
 ///	Returns the most recent entries (newest first) of the history of the Phoebus alarm
 /// 	system, as JSON object:
